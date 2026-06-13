@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>柴犬ダッシュ！</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; touch-action:none; }
+body { background:#000; overflow:hidden; height:100vh; font-family:sans-serif; }
+canvas { display:block; }
+#hud {
+  position:fixed; top:0; left:0; right:0;
+  display:flex; justify-content:space-between; align-items:flex-start;
+  padding:14px 18px; pointer-events:none; z-index:20;
+}
+#score-box, #timer-box {
+  background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.2);
+  border-radius:12px; padding:6px 16px; color:#fff; font-size:22px; font-weight:bold;
+}
+#timer-box { text-align:right; }
+.hud-label { font-size:11px; color:rgba(255,255,255,0.5); margin-bottom:1px; }
+#timer-val { color:#ffdd44; }
+#timer-val.danger { color:#ff4444; animation:blink .4s infinite alternate; }
+@keyframes blink { from{opacity:1}to{opacity:.3} }
+#joystick-area { position:fixed; left:24px; bottom:36px; z-index:20; width:120px; height:120px; }
+#joystick-base {
+  width:120px; height:120px; border-radius:50%;
+  background:rgba(255,255,255,0.12); border:2px solid rgba(255,255,255,0.25); position:absolute;
+}
+#joystick-knob {
+  width:52px; height:52px; border-radius:50%;
+  background:rgba(255,255,255,0.45); border:2px solid rgba(255,255,255,0.7);
+  position:absolute; top:34px; left:34px;
+}
+#btns { position:fixed; right:20px; bottom:36px; z-index:20; display:flex; flex-direction:column; gap:12px; align-items:center; }
+.atk-btn {
+  width:76px; height:76px; border-radius:50%;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  cursor:pointer; user-select:none; -webkit-user-select:none;
+  font-size:26px; color:#fff; border:3px solid; transition:transform .08s;
+  -webkit-tap-highlight-color:transparent;
+}
+.atk-btn:active { transform:scale(0.88); }
+#tongue-btn { background:rgba(220,60,100,0.55); border-color:rgba(255,100,140,0.8); }
+#unchi-btn  { background:rgba(120,70,20,0.6);  border-color:rgba(180,120,50,0.8); }
+.atk-label { font-size:9px; margin-top:1px; opacity:.8; }
+#overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,0.75);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  z-index:30; color:#fff; text-align:center;
+}
+#overlay h1 { font-size:30px; margin-bottom:8px; }
+#overlay .sub { font-size:13px; color:rgba(255,255,255,0.6); margin-bottom:24px; line-height:1.8; }
+.final-score { font-size:52px; font-weight:bold; color:#ffdd44; margin:10px 0; }
+#start-btn {
+  background:linear-gradient(135deg,#c86020,#e88030); border:none; color:#fff;
+  font-size:18px; font-weight:bold; padding:14px 40px; border-radius:30px; cursor:pointer;
+}
+#combo-popup {
+  position:fixed; top:28%; left:50%; transform:translateX(-50%);
+  color:#ffdd44; font-size:26px; font-weight:bold;
+  pointer-events:none; z-index:25; opacity:0; text-shadow:0 0 12px rgba(255,180,0,.8);
+}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="score-box"><div class="hud-label">スコア</div><div id="score-val">0</div></div>
+  <div id="timer-box"><div class="hud-label">残り時間</div><div id="timer-val">60</div></div>
+</div>
+<div id="joystick-area">
+  <div id="joystick-base"></div>
+  <div id="joystick-knob"></div>
+</div>
+<div id="btns">
+  <div class="atk-btn" id="tongue-btn">👅<span class="atk-label">舌攻撃</span></div>
+  <div class="atk-btn" id="unchi-btn">💩<span class="atk-label">うんち</span></div>
+</div>
+<div id="combo-popup"></div>
+<div id="overlay">
+  <h1>🐕 柴犬ダッシュ！</h1>
+  <div class="sub">
+    原っぱを駆けまわってピンを倒せ！<br>
+    👅 舌：顔の前に発射<br>
+    💩 うんち：おしりから発射<br>
+    体当たりでも倒せる！<br>
+    制限時間60秒
+  </div>
+  <button id="start-btn">🐾 スタート！</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════
+   座標系の定義（最重要）
+   ───────────────────────────────────────────────────────────
+   ・柴犬モデルは「顔が +Z 方向」を向いて作られている
+   ・SB.facing = 0 のとき、柴犬は +Z を向く
+   ・shiba.root.rotation.y = SB.facing （+PIなどの補正は一切しない）
+   ・前方ベクトル forward = (sin(facing), 0, cos(facing))
+     - facing=0      → (0,0,1)  = +Z   ✓モデルの顔の向きと一致
+     - facing=PI/2   → (1,0,0)  = +X
+   ・後方ベクトル backward = -forward
+   ═══════════════════════════════════════════════════════════ */
+
+function forwardVec(facing){ return new THREE.Vector3(Math.sin(facing),0,Math.cos(facing)); }
+
+// ══ Renderer ══════════════════════════════════════
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x7ec898);
+scene.fog=new THREE.Fog(0x7ec898,30,60);
+
+const camera=new THREE.PerspectiveCamera(52,innerWidth/innerHeight,0.1,200);
+camera.position.set(0,5,-8);
+
+// ══ Lights ════════════════════════════════════════
+scene.add(new THREE.AmbientLight(0xfff8e8,0.7));
+const sun=new THREE.DirectionalLight(0xfff4d0,1.4);
+sun.position.set(10,20,10); sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);
+sun.shadow.camera.near=1; sun.shadow.camera.far=80;
+sun.shadow.camera.left=-30; sun.shadow.camera.right=30;
+sun.shadow.camera.top=30; sun.shadow.camera.bottom=-30;
+scene.add(sun);
+const fill=new THREE.DirectionalLight(0xb0d0ff,0.35);
+fill.position.set(-8,6,-4); scene.add(fill);
+
+// ══ Materials ═════════════════════════════════════
+const M={
+  red   :new THREE.MeshStandardMaterial({color:0xBF5E1A,roughness:0.82}),
+  cream :new THREE.MeshStandardMaterial({color:0xF0E3C0,roughness:0.85}),
+  nose  :new THREE.MeshStandardMaterial({color:0x140c0c,roughness:0.35}),
+  eye   :new THREE.MeshStandardMaterial({color:0x090508,roughness:0.15,metalness:0.4}),
+  shine :new THREE.MeshStandardMaterial({color:0xffffff,emissive:0xffffff,emissiveIntensity:0.9}),
+  tongue:new THREE.MeshStandardMaterial({color:0xE04868,roughness:0.75}),
+  inear :new THREE.MeshStandardMaterial({color:0xCC7070,roughness:0.9}),
+  grass :new THREE.MeshStandardMaterial({color:0x52a058,roughness:1.0}),
+  pin   :new THREE.MeshStandardMaterial({color:0xfafafa,roughness:0.6}),
+  pinRed:new THREE.MeshStandardMaterial({color:0xff2222,roughness:0.6}),
+  proj  :new THREE.MeshStandardMaterial({color:0xE04868,roughness:0.7}),
+  unchi :new THREE.MeshStandardMaterial({color:0x6b3a10,roughness:0.9}),
+};
+
+// ══ Helpers ═══════════════════════════════════════
+function sph(sx,sy,sz,mat){const m=new THREE.Mesh(new THREE.SphereGeometry(1,20,16),mat);m.scale.set(sx,sy,sz);m.castShadow=true;return m;}
+function cyl(rt,rb,h,mat,seg=12){const m=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg),mat);m.castShadow=true;return m;}
+function cone(r,h,mat,seg=8){const m=new THREE.Mesh(new THREE.ConeGeometry(r,h,seg),mat);m.castShadow=true;return m;}
+
+// ══ Build Shiba（顔は +Z 向き）════════════════════
+function buildShiba(){
+  const root=new THREE.Group();
+  const BODY_Y=0.75;
+
+  const bodyG=new THREE.Group();
+  bodyG.position.set(0,BODY_Y,0); root.add(bodyG);
+  bodyG.add(sph(0.55,0.44,0.70,M.red));
+  const belly=sph(0.46,0.28,0.50,M.cream); belly.position.set(0,-0.20,0.08); bodyG.add(belly);
+  const chest=sph(0.34,0.30,0.28,M.cream); chest.position.set(0,0.05,0.50); bodyG.add(chest);
+
+  const neckG=new THREE.Group();
+  neckG.position.set(0,BODY_Y+0.28,0.30); neckG.rotation.x=-0.30;
+  root.add(neckG); neckG.add(cyl(0.20,0.24,0.36,M.red));
+
+  // head (+Z前方)
+  const headG=new THREE.Group();
+  headG.position.set(0,BODY_Y+0.68,0.50); root.add(headG);
+  headG.add(sph(0.40,0.38,0.40,M.red));
+  [-1,1].forEach(s=>{const c=sph(0.16,0.14,0.12,M.cream);c.position.set(s*0.20,-0.06,0.29);headG.add(c);});
+  const muzzle=sph(0.20,0.16,0.20,M.cream); muzzle.position.set(0,-0.13,0.34); headG.add(muzzle);
+  const noseMesh=sph(0.080,0.058,0.068,M.nose); noseMesh.position.set(0,-0.07,0.51); headG.add(noseMesh);
+  [-1,1].forEach(s=>{
+    const e=sph(0.068,0.056,0.050,M.eye); e.position.set(s*0.165,0.10,0.35); headG.add(e);
+    const sh=sph(0.020,0.020,0.016,M.shine); sh.position.set(s*0.165+s*0.016,0.116,0.396); headG.add(sh);
+  });
+  [-1,1].forEach(s=>{
+    const eg=new THREE.Group(); eg.position.set(s*0.28,0.28,-0.02); eg.rotation.set(-0.12,s*0.16,s*0.08);
+    const eo=cone(0.14,0.36,M.red,8); eo.position.y=0.18; eg.add(eo);
+    const ei=cone(0.085,0.24,M.inear,8); ei.position.set(0,0.19,0.04); eg.add(ei);
+    headG.add(eg);
+  });
+  const tongueDisp=new THREE.Group(); tongueDisp.visible=false; headG.add(tongueDisp);
+  const td=sph(0.11,0.046,0.10,M.tongue); td.position.set(0,-0.25,0.43); tongueDisp.add(td);
+
+  // tail (-Z後方)
+  const tailG=new THREE.Group(); tailG.position.set(0,BODY_Y+0.22,-0.60); root.add(tailG);
+  const tb=cyl(0.09,0.12,0.28,M.red); tb.position.set(0,0.14,0); tb.rotation.x=-0.65; tailG.add(tb);
+  const tm=cyl(0.075,0.09,0.24,M.red); tm.position.set(0,0.36,-0.13); tm.rotation.x=-1.55; tailG.add(tm);
+  const tt=sph(0.095,0.095,0.11,M.cream); tt.position.set(0,0.48,-0.08); tailG.add(tt);
+
+  const LEG_TOP_Y=BODY_Y-0.42;
+  function makeLeg(){
+    const g=new THREE.Group();
+    const up=cyl(0.095,0.085,0.34,M.red); up.position.y=-0.17; g.add(up);
+    const lo=cyl(0.075,0.068,0.30,M.red); lo.position.y=-0.49; g.add(lo);
+    const pw=sph(0.105,0.055,0.125,M.cream); pw.position.set(0,-0.66,0.04); g.add(pw);
+    return g;
+  }
+  const FL=makeLeg(); FL.position.set(-0.23,LEG_TOP_Y, 0.28); root.add(FL);
+  const FR=makeLeg(); FR.position.set( 0.23,LEG_TOP_Y, 0.28); root.add(FR);
+  const BL=makeLeg(); BL.position.set(-0.25,LEG_TOP_Y,-0.22); root.add(BL);
+  const BR=makeLeg(); BR.position.set( 0.25,LEG_TOP_Y,-0.22); root.add(BR);
+
+  root.position.y=0.38;
+  return {root,tailG,tongueDisp,headG,FL,FR,BL,BR,bodyG};
+}
+
+// ══ Build Pin ═════════════════════════════════════
+function buildPin(){
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(new THREE.CylinderGeometry(0.18,0.22,0.9,12),M.pin);
+  body.position.y=0.45; body.castShadow=true; g.add(body);
+  const head=new THREE.Mesh(new THREE.SphereGeometry(0.18,12,10),M.pin);
+  head.position.y=0.98; head.castShadow=true; g.add(head);
+  const stripe=new THREE.Mesh(new THREE.CylinderGeometry(0.185,0.185,0.1,12),M.pinRed);
+  stripe.position.y=0.60; g.add(stripe);
+  [-1,1].forEach(s=>{
+    const eye=new THREE.Mesh(new THREE.SphereGeometry(0.04,8,8),M.nose);
+    eye.position.set(s*0.08,1.0,0.14); g.add(eye);
+  });
+  return g;
+}
+
+// ══ Field ═════════════════════════════════════════
+const FIELD=18;
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(FIELD*2,FIELD*2,20,20),M.grass);
+ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
+for(let i=0;i<80;i++){
+  const g=new THREE.Mesh(
+    new THREE.ConeGeometry(0.12+Math.random()*0.1,0.4+Math.random()*0.4,5),
+    new THREE.MeshStandardMaterial({color:0x429048+Math.floor(Math.random()*0x0f0f0f),roughness:1})
+  );
+  const a=Math.random()*Math.PI*2,r=7+Math.random()*10;
+  g.position.set(Math.cos(a)*r,0.15,Math.sin(a)*r); scene.add(g);
+}
+
+// ══ State ═════════════════════════════════════════
+let gameState='menu';
+let score=0,timeLeft=60,timerInterval=null;
+
+const shiba=buildShiba();
+scene.add(shiba.root);
+
+const SB={
+  pos:new THREE.Vector3(0,0,0),
+  vel:new THREE.Vector3(0,0,0),
+  facing:0,
+  speed:6.5,
+  legPhase:0,
+};
+
+const pins=[];
+const MAX_PINS=16;
+
+function spawnPin(){
+  if(pins.length>=MAX_PINS) return;
+  const a=Math.random()*Math.PI*2, r=5+Math.random()*(FIELD-6);
+  const pin=buildPin();
+  pin.position.set(Math.cos(a)*r,0,Math.sin(a)*r);
+  pin.userData={alive:true, fallVel:0, fallRot:0, blowX:0, blowZ:0, spin:0};
+  scene.add(pin); pins.push(pin);
+}
+
+const projectiles=[];
+
+// ── 舌：顔の前(+forward)に発射 ───────────────────
+function fireTongue(){
+  if(gameState!=='playing') return;
+  const fwd=forwardVec(SB.facing);
+  // 発射位置 = 柴犬の中心 + 前方0.9 + 高さ1.4（頭の位置）
+  const pos=SB.pos.clone().add(fwd.clone().multiplyScalar(0.9));
+  pos.y=1.35;
+  const mesh=new THREE.Mesh(new THREE.SphereGeometry(0.18,8,6),M.proj.clone());
+  mesh.position.copy(pos);
+  mesh.castShadow=true;
+  scene.add(mesh);
+  projectiles.push({mesh, vel:fwd.clone().multiplyScalar(16), life:1.4, gravity:false});
+  // 舌アニメ
+  shiba.tongueDisp.visible=true;
+  setTimeout(()=>shiba.tongueDisp.visible=false,300);
+}
+
+// ── うんち：おしり(-forward)から発射 ─────────────
+function fireUnchi(){
+  if(gameState!=='playing') return;
+  const back=forwardVec(SB.facing).multiplyScalar(-1);
+  // 発射位置 = 柴犬の中心 + 後方0.7 + 高さ0.7（おしりの位置）
+  const pos=SB.pos.clone().add(back.clone().multiplyScalar(0.7));
+  pos.y=0.7;
+  const group=new THREE.Group();
+  group.position.copy(pos);
+  [0,0.20,0.34].forEach((y,i)=>{
+    const r=0.17-i*0.04;
+    const s=new THREE.Mesh(new THREE.SphereGeometry(r,8,6),M.unchi);
+    s.position.y=y; s.castShadow=true; group.add(s);
+  });
+  scene.add(group);
+  // 後方やや上に放物線
+  const vel=back.clone().multiplyScalar(9).add(new THREE.Vector3(0,3.5,0));
+  projectiles.push({mesh:group, vel, life:2.5, gravity:true});
+}
+
+// ── ピンを倒す＋吹っ飛ばす ───────────────────────
+function knockPin(pin, fromX, fromZ, power){
+  if(!pin.userData.alive) return false;
+  pin.userData.alive=false;
+  score++; updateHUD(); showCombo('+1 🐾');
+
+  let dx=pin.position.x-fromX;
+  let dz=pin.position.z-fromZ;
+  const len=Math.sqrt(dx*dx+dz*dz)||1;
+  dx/=len; dz/=len;
+  pin.userData.blowX=dx*power;
+  pin.userData.blowZ=dz*power;
+  pin.userData.spin=(Math.random()-0.5)*12;
+  pin.userData.fallVel=0;
+  pin.userData.fallRot=0;
+
+  setTimeout(()=>{
+    const a=Math.random()*Math.PI*2, r=5+Math.random()*(FIELD-6);
+    pin.position.set(Math.cos(a)*r,0,Math.sin(a)*r);
+    pin.rotation.set(0,Math.random()*Math.PI*2,0);
+    pin.userData.alive=true;
+    pin.userData.blowX=0; pin.userData.blowZ=0; pin.userData.spin=0;
+    pin.userData.fallRot=0; pin.userData.fallVel=0;
+    if(pins.length<MAX_PINS && Math.random()<0.5) spawnPin();
+  },3000);
+  return true;
+}
+
+// ══ Joystick ══════════════════════════════════════
+const joyState={dx:0,dy:0,id:null};
+const joyArea=document.getElementById('joystick-area');
+const joyKnob=document.getElementById('joystick-knob');
+const JR=60;
+function joyCenter(){const r=joyArea.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2};}
+function updateJoy(cx,cy){
+  const c=joyCenter();
+  let dx=cx-c.x,dy=cy-c.y;
+  const len=Math.sqrt(dx*dx+dy*dy);
+  if(len>JR){dx=dx/len*JR;dy=dy/len*JR;}
+  joyState.dx=dx/JR; joyState.dy=dy/JR;
+  joyKnob.style.transform=`translate(${dx}px,${dy}px)`;
+}
+joyArea.addEventListener('touchstart',e=>{
+  const t=e.changedTouches[0]; joyState.id=t.identifier; updateJoy(t.clientX,t.clientY);
+},{passive:true});
+window.addEventListener('touchmove',e=>{
+  for(const t of e.changedTouches) if(t.identifier===joyState.id) updateJoy(t.clientX,t.clientY);
+},{passive:true});
+window.addEventListener('touchend',e=>{
+  for(const t of e.changedTouches) if(t.identifier===joyState.id){
+    joyState.dx=0; joyState.dy=0; joyState.id=null;
+    joyKnob.style.transform='translate(0,0)';
+  }
+},{passive:true});
+
+// ══ Camera ════════════════════════════════════════
+let camYaw=0, camPitch=0.55, camDist=7.5;
+let camTouchId=null, camPX=0, camPY=0, camDrag=false;
+renderer.domElement.addEventListener('mousedown',e=>{camDrag=true;camPX=e.clientX;camPY=e.clientY;});
+window.addEventListener('mouseup',()=>camDrag=false);
+window.addEventListener('mousemove',e=>{
+  if(!camDrag)return;
+  camYaw+=(e.clientX-camPX)*0.012; camPitch+=(e.clientY-camPY)*0.008;
+  camPitch=Math.max(0.18,Math.min(1.2,camPitch));
+  camPX=e.clientX; camPY=e.clientY;
+});
+renderer.domElement.addEventListener('touchstart',e=>{
+  for(const t of e.changedTouches) if(t.clientX>innerWidth*0.42 && camTouchId===null){
+    camTouchId=t.identifier; camPX=t.clientX; camPY=t.clientY;
+  }
+},{passive:true});
+window.addEventListener('touchend',e=>{
+  for(const t of e.changedTouches) if(t.identifier===camTouchId) camTouchId=null;
+},{passive:true});
+window.addEventListener('touchmove',e=>{
+  for(const t of e.changedTouches) if(t.identifier===camTouchId){
+    camYaw+=(t.clientX-camPX)*0.012; camPitch+=(t.clientY-camPY)*0.008;
+    camPitch=Math.max(0.18,Math.min(1.2,camPitch));
+    camPX=t.clientX; camPY=t.clientY;
+  }
+},{passive:true});
+renderer.domElement.addEventListener('wheel',e=>{
+  camDist=Math.max(3,Math.min(14,camDist+e.deltaY*0.006));
+},{passive:true});
+
+// ピンチズーム（スマホ2本指）
+let pinchDist0=null;
+window.addEventListener('touchstart',e=>{
+  if(e.touches.length===2){
+    const dx=e.touches[0].clientX-e.touches[1].clientX;
+    const dy=e.touches[0].clientY-e.touches[1].clientY;
+    pinchDist0=Math.sqrt(dx*dx+dy*dy);
+  }
+},{passive:true});
+window.addEventListener('touchmove',e=>{
+  if(e.touches.length===2 && pinchDist0!==null){
+    const dx=e.touches[0].clientX-e.touches[1].clientX;
+    const dy=e.touches[0].clientY-e.touches[1].clientY;
+    const d=Math.sqrt(dx*dx+dy*dy);
+    camDist=Math.max(3,Math.min(14,camDist-(d-pinchDist0)*0.018));
+    pinchDist0=d;
+  }
+},{passive:true});
+window.addEventListener('touchend',e=>{
+  if(e.touches.length<2) pinchDist0=null;
+},{passive:true});
+
+const keys={};
+window.addEventListener('keydown',e=>keys[e.key]=true);
+window.addEventListener('keyup',  e=>keys[e.key]=false);
+
+document.getElementById('tongue-btn').addEventListener('touchstart',e=>{e.preventDefault();fireTongue();},{passive:false});
+document.getElementById('tongue-btn').addEventListener('click',fireTongue);
+document.getElementById('unchi-btn').addEventListener('touchstart',e=>{e.preventDefault();fireUnchi();},{passive:false});
+document.getElementById('unchi-btn').addEventListener('click',fireUnchi);
+
+// ══ HUD ═══════════════════════════════════════════
+function updateHUD(){
+  document.getElementById('score-val').textContent=score;
+  const tv=document.getElementById('timer-val');
+  tv.textContent=timeLeft; tv.className=timeLeft<=10?'danger':'';
+}
+function showCombo(txt){
+  const el=document.getElementById('combo-popup');
+  el.textContent=txt; el.style.transition='none'; el.style.opacity='1';
+  el.style.transform='translateX(-50%) scale(1.3)';
+  setTimeout(()=>{
+    el.style.transition='opacity .5s,transform .5s';
+    el.style.opacity='0'; el.style.transform='translateX(-50%) scale(0.9)';
+  },400);
+}
+
+// ══ Start / End ═══════════════════════════════════
+function startGame(){
+  score=0; timeLeft=60; gameState='playing';
+  SB.pos.set(0,0,0); SB.vel.set(0,0,0); SB.facing=0;
+  pins.forEach(p=>scene.remove(p)); pins.length=0;
+  projectiles.forEach(p=>scene.remove(p.mesh)); projectiles.length=0;
+  for(let i=0;i<12;i++) spawnPin();
+  document.getElementById('overlay').style.display='none';
+  updateHUD();
+  timerInterval=setInterval(()=>{
+    if(gameState!=='playing')return;
+    timeLeft--; updateHUD();
+    if(timeLeft<=0) endGame();
+  },1000);
+}
+function endGame(){
+  gameState='end'; clearInterval(timerInterval);
+  const ov=document.getElementById('overlay');
+  ov.innerHTML=`
+    <h1>🐕 タイムアップ！</h1>
+    <div class="sub">倒したピンの数</div>
+    <div class="final-score">${score} 本</div>
+    <div class="sub">${score>=30?'最強の柴犬！🏆':score>=15?'なかなかやるね！👏':'もっと走れ！💨'}</div>
+    <button onclick="location.reload()" style="background:linear-gradient(135deg,#c86020,#e88030);border:none;color:#fff;font-size:18px;font-weight:bold;padding:14px 40px;border-radius:30px;cursor:pointer;">🔄 もう一度！</button>
+  `;
+  ov.style.display='flex';
+}
+document.getElementById('start-btn').addEventListener('click',startGame);
+
+// ══ Main Loop ═════════════════════════════════════
+const clock=new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=Math.min(clock.getDelta(),0.05);
+  const t=clock.elapsedTime;
+
+  if(gameState==='playing'){
+    // 入力取得（jy<0=上=前）
+    let jx=joyState.dx, jy=joyState.dy;
+    if(keys['ArrowUp']||keys['w'])    jy=-1;
+    if(keys['ArrowDown']||keys['s'])  jy= 1;
+    if(keys['ArrowLeft']||keys['a'])  jx=-1;
+    if(keys['ArrowRight']||keys['d']) jx= 1;
+    if(keys[' ']){fireTongue(); keys[' ']=false;}
+    if(keys['f']){fireUnchi();  keys['f']=false;}
+
+    const inputLen=Math.sqrt(jx*jx+jy*jy);
+
+    if(inputLen>0.05){
+      /* カメラのYaw基準で移動方向を決める
+         カメラは柴犬の後方(camYaw方向の反対)にいる
+         「スティック上(jy<0)」= 画面奥 = カメラから見て前方向 に進ませたい
+
+         カメラ前方ベクトル(水平): 
+           camFwd = ( -sin(camYaw), -cos(camYaw) )  [後述の配置に合わせる]
+      */
+      const camFwdX=Math.sin(camYaw);
+      const camFwdZ=Math.cos(camYaw);
+      const camRgtX=-Math.cos(camYaw);
+      const camRgtZ= Math.sin(camYaw);
+
+      // jy=-1(上)で前進 → camFwd方向
+      let mx=camFwdX*(-jy)+camRgtX*jx;
+      let mz=camFwdZ*(-jy)+camRgtZ*jx;
+      const mlen=Math.sqrt(mx*mx+mz*mz)||1;
+      mx/=mlen; mz/=mlen;
+
+      const spd=Math.min(inputLen,1)*SB.speed;
+      SB.vel.x+=(mx*spd-SB.vel.x)*0.18;
+      SB.vel.z+=(mz*spd-SB.vel.z)*0.18;
+
+      // facing更新：forwardVec(facing)=(sin,cos)=(mx,mz) になるよう
+      // atan2(x,z)
+      const targetFacing=Math.atan2(mx,mz);
+      let diff=targetFacing-SB.facing;
+      while(diff>Math.PI) diff-=Math.PI*2;
+      while(diff<-Math.PI) diff+=Math.PI*2;
+      SB.facing+=diff*0.18;
+    } else {
+      SB.vel.x*=0.74; SB.vel.z*=0.74;
+    }
+
+    SB.pos.x+=SB.vel.x*dt;
+    SB.pos.z+=SB.vel.z*dt;
+
+    const bd=Math.sqrt(SB.pos.x**2+SB.pos.z**2);
+    if(bd>FIELD-1){SB.pos.x*=(FIELD-1)/bd; SB.pos.z*=(FIELD-1)/bd; SB.vel.multiplyScalar(0.3);}
+
+    shiba.root.position.x=SB.pos.x;
+    shiba.root.position.z=SB.pos.z;
+    shiba.root.rotation.y=SB.facing; // ★補正なし
+
+    // 走りアニメ
+    const spd=SB.vel.length();
+    SB.legPhase+=spd*dt*3.5;
+    const sw=Math.sin(SB.legPhase)*Math.min(spd/SB.speed,1)*0.45;
+    shiba.FL.rotation.x= sw; shiba.BR.rotation.x= sw;
+    shiba.FR.rotation.x=-sw; shiba.BL.rotation.x=-sw;
+    shiba.bodyG.position.y=0.75+Math.abs(Math.sin(SB.legPhase))*spd/SB.speed*0.06;
+    shiba.tailG.rotation.z=Math.sin(t*3.5)*0.28+spd*0.05;
+
+    // ピン処理
+    pins.forEach(pin=>{
+      if(!pin.userData.alive){
+        // 吹っ飛び移動
+        pin.position.x+=pin.userData.blowX*dt;
+        pin.position.z+=pin.userData.blowZ*dt;
+        pin.userData.blowX*=0.97;
+        pin.userData.blowZ*=0.97;
+        // 倒れ回転
+        pin.userData.fallVel+=dt*15;
+        pin.userData.fallRot+=pin.userData.fallVel*dt;
+        pin.rotation.x=Math.min(pin.userData.fallRot,Math.PI/2);
+        pin.rotation.z+=pin.userData.spin*dt;
+        pin.userData.spin*=0.97;
+        return;
+      }
+      // 体当たり判定
+      const dx=pin.position.x-SB.pos.x;
+      const dz=pin.position.z-SB.pos.z;
+      if(Math.sqrt(dx*dx+dz*dz)<0.9){
+        knockPin(pin,SB.pos.x,SB.pos.z,35);
+      }
+    });
+
+    // プロジェクタイル処理
+    for(let i=projectiles.length-1;i>=0;i--){
+      const p=projectiles[i];
+      p.mesh.position.x+=p.vel.x*dt;
+      p.mesh.position.y+=p.vel.y*dt;
+      p.mesh.position.z+=p.vel.z*dt;
+      if(p.gravity){
+        p.vel.y-=14*dt;
+        if(p.mesh.position.y<0.2){
+          p.mesh.position.y=0.2;
+          p.vel.y*=-0.4; p.vel.x*=0.6; p.vel.z*=0.6;
+        }
+      }
+      p.mesh.rotation.y+=dt*5;
+      p.life-=dt;
+
+      // ピン当たり判定（XZ平面距離で判定。高さは緩め）
+      let hit=false;
+      for(const pin of pins){
+        if(!pin.userData.alive) continue;
+        const dx=pin.position.x-p.mesh.position.x;
+        const dz=pin.position.z-p.mesh.position.z;
+        const distXZ=Math.sqrt(dx*dx+dz*dz);
+        // ピンの高さ範囲(0〜1.2)にプロジェクタイルがあれば当たり
+        if(distXZ<0.6 && p.mesh.position.y<1.4 && p.mesh.position.y>-0.2){
+          knockPin(pin,p.mesh.position.x,p.mesh.position.z,40);
+          hit=true; break;
+        }
+      }
+
+      if(p.life<=0||hit){
+        scene.remove(p.mesh); projectiles.splice(i,1);
+      }
+    }
+
+    if(pins.filter(p=>p.userData.alive).length<6) spawnPin();
+
+  } else {
+    shiba.root.rotation.y=t*0.5;
+    shiba.tailG.rotation.z=Math.sin(t*3)*0.25;
+  }
+
+  // ── カメラ追従 ──
+  // カメラは柴犬の後方上空。camYaw=0のとき柴犬の-Z側(後ろ)から見る
+  const tx=shiba.root.position.x, tz=shiba.root.position.z;
+  const cx=tx - Math.sin(camYaw)*camDist*Math.cos(camPitch);
+  const cy=camDist*Math.sin(camPitch)+0.8;
+  const cz=tz - Math.cos(camYaw)*camDist*Math.cos(camPitch);
+  camera.position.x+=(cx-camera.position.x)*0.10;
+  camera.position.y+=(cy-camera.position.y)*0.10;
+  camera.position.z+=(cz-camera.position.z)*0.10;
+  camera.lookAt(tx,1.0,tz);
+
+  renderer.render(scene,camera);
+}
+animate();
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
